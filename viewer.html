@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Studio Remote — Viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --border: #2a2e37; --text: #e8eaed;
+    --dim: #8a8f9a; --accent: #5b8cff; --ok: #3ecf8e; --bad: #ff5b6a;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  body { margin: 0; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  p.sub { color: var(--dim); margin: 0 0 20px; font-size: 14px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  input[type=text], input[type=password] {
+    background: #101216; border: 1px solid var(--border); color: var(--text);
+    padding: 9px 10px; border-radius: 6px; font-size: 14px; flex: 1; min-width: 140px;
+  }
+  input[type=number] {
+    background: #101216; border: 1px solid var(--border); color: var(--text);
+    padding: 6px 8px; border-radius: 6px; font-size: 13px; width: 70px;
+  }
+  button {
+    background: var(--accent); color: white; border: none; padding: 9px 16px;
+    border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 500;
+  }
+  .status { font-size: 13px; color: var(--dim); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+  .dot.off { background: var(--bad); } .dot.on { background: var(--ok); }
+  .video-wrap { position: relative; background: #000; border-radius: 6px; overflow: hidden; }
+  video { width: 100%; display: block; }
+  #fullscreenBtn {
+    position: absolute; top: 10px; right: 10px; background: rgba(20,22,26,0.7);
+    border: 1px solid var(--border); width: 34px; height: 34px; padding: 0;
+    font-size: 16px; line-height: 1; border-radius: 6px; backdrop-filter: blur(4px);
+  }
+  #fullscreenBtn:hover { background: rgba(20,22,26,0.9); }
+  .video-wrap:fullscreen { display: flex; align-items: center; justify-content: center; background: #000; }
+  .video-wrap:fullscreen video { width: auto; height: 100%; max-width: 100%; object-fit: contain; }
+  .video-wrap:-webkit-full-screen { display: flex; align-items: center; justify-content: center; background: #000; }
+  .video-wrap:-webkit-full-screen video { width: auto; height: 100%; max-width: 100%; object-fit: contain; }
+  .hint { font-size: 12px; color: var(--dim); margin-top: 8px; }
+  details summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+  .calib-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+  .calib-grid label { font-size: 11px; color: var(--dim); display: block; margin-bottom: 3px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Studio Remote — Viewer</h1>
+  <p class="sub">Connect to a hosted Roblox Studio session. Click into the video to send input.</p>
+
+  <div class="panel">
+    <div class="row">
+      <input type="text" id="hostId" placeholder="host ID (e.g. studio-ab12cd)" />
+      <input type="password" id="pw" placeholder="password" />
+      <button id="connectBtn">Connect</button>
+    </div>
+    <div class="status" style="margin-top:10px;"><span class="dot off" id="connDot"></span><span id="connStatus">not connected</span></div>
+  </div>
+
+  <div class="panel">
+    <div class="video-wrap" id="videoWrap">
+      <video id="remote" autoplay playsinline muted></video>
+      <button id="playBtn" style="display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);">Click to start video</button>
+      <button id="fullscreenBtn" title="Fullscreen">⛶</button>
+    </div>
+    <p class="hint">Click the video once to enable keyboard capture. Scroll/click/drag works directly on the video. Use the ⛶ button for fullscreen.</p>
+    <details>
+      <summary>Calibration (fine-tune if clicks land slightly off)</summary>
+      <div class="calib-grid">
+        <div><label>Offset X (px)</label><input type="number" id="dx" value="0"></div>
+        <div><label>Offset Y (px)</label><input type="number" id="dy" value="0"></div>
+        <div><label>Scale X</label><input type="number" id="sx" value="1" step="0.01"></div>
+        <div><label>Scale Y</label><input type="number" id="sy" value="1" step="0.01"></div>
+      </div>
+      <button id="calibBtn" style="margin-top:10px;">Apply calibration</button>
+    </details>
+  </div>
+</div>
+
+<script>
+const video = document.getElementById('remote');
+let peer = null, conn = null, authed = false;
+
+function setStatus(text, ok) {
+  document.getElementById('connStatus').textContent = text;
+  document.getElementById('connDot').className = 'dot ' + (ok ? 'on' : 'off');
+}
+
+document.getElementById('connectBtn').addEventListener('click', () => {
+  const hostId = document.getElementById('hostId').value.trim();
+  const pw = document.getElementById('pw').value;
+  if (!hostId) return;
+
+  peer = new Peer(null, {
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
+      ]
+    }
+  });
+
+  peer.on('open', (myId) => {
+    // data connection for control
+    conn = peer.connect(hostId);
+    conn.on('open', () => {
+      conn.send({ type: 'auth', token: pw, viewerId: myId });
+    });
+    conn.on('data', (data) => {
+      if (data.type === 'auth-ok') {
+        authed = true;
+        setStatus('connected — waiting for video...', true);
+      } else if (data.type === 'auth-fail') {
+        setStatus('wrong password', false);
+        conn.close();
+      }
+    });
+    conn.on('close', () => { authed = false; setStatus('disconnected', false); });
+  });
+
+  // The host initiates the video call once we're authenticated (its offer is the
+  // one that needs to carry the actual video track, so it has to be the caller).
+  peer.on('call', (call) => {
+    call.answer(); // we have nothing to send back, just receiving
+    call.on('stream', (stream) => {
+      setStatus('connected', true);
+      video.srcObject = stream;
+      const playPromise = video.play();
+      if (playPromise && playPromise.catch) {
+        playPromise.catch(() => {
+          document.getElementById('playBtn').style.display = 'block';
+        });
+      }
+    });
+    call.on('error', (e) => setStatus('video call error: ' + e.message, false));
+    call.on('close', () => setStatus('video call closed', false));
+    const pc = call.peerConnection;
+    if (pc) {
+      pc.addEventListener('iceconnectionstatechange', () => {
+        console.log('ICE state:', pc.iceConnectionState);
+        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+          setStatus('connection ' + pc.iceConnectionState + ' — network/firewall may be blocking it', false);
+        }
+      });
+    }
+  });
+
+  peer.on('error', (err) => setStatus('error: ' + err.type, false));
+});
+
+document.getElementById('playBtn').addEventListener('click', () => {
+  video.play();
+  document.getElementById('playBtn').style.display = 'none';
+});
+
+// ---- Fullscreen ----
+const videoWrap = document.getElementById('videoWrap');
+const fullscreenBtn = document.getElementById('fullscreenBtn');
+
+function isFullscreen() {
+  return document.fullscreenElement || document.webkitFullscreenElement;
+}
+
+function enterFullscreen() {
+  if (videoWrap.requestFullscreen) videoWrap.requestFullscreen();
+  else if (videoWrap.webkitRequestFullscreen) videoWrap.webkitRequestFullscreen();
+  else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen(); // iOS Safari: video-only fullscreen
+}
+
+function exitFullscreen() {
+  if (document.exitFullscreen) document.exitFullscreen();
+  else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+}
+
+fullscreenBtn.addEventListener('click', () => {
+  if (isFullscreen()) exitFullscreen();
+  else enterFullscreen();
+});
+
+document.addEventListener('fullscreenchange', () => {
+  fullscreenBtn.textContent = isFullscreen() ? '⤫' : '⛶';
+  fullscreenBtn.title = isFullscreen() ? 'Exit fullscreen' : 'Fullscreen';
+});
+document.addEventListener('webkitfullscreenchange', () => {
+  fullscreenBtn.textContent = isFullscreen() ? '⤫' : '⛶';
+  fullscreenBtn.title = isFullscreen() ? 'Exit fullscreen' : 'Fullscreen';
+});
+
+function send(msg) {
+  if (conn && authed) conn.send(msg);
+}
+
+// ---- Mouse ----
+function relCoords(e) {
+  const rect = video.getBoundingClientRect();
+  const x = (e.clientX - rect.left) / rect.width;
+  const y = (e.clientY - rect.top) / rect.height;
+  return { xRel: Math.min(1, Math.max(0, x)), yRel: Math.min(1, Math.max(0, y)) };
+}
+video.addEventListener('mousemove', (e) => send({ type: 'move', ...relCoords(e) }));
+video.addEventListener('mousedown', (e) => { send({ type: 'down', button: e.button, ...relCoords(e) }); video.focus(); });
+video.addEventListener('mouseup', (e) => send({ type: 'up', button: e.button, ...relCoords(e) }));
+video.addEventListener('wheel', (e) => { send({ type: 'wheel', deltaY: e.deltaY }); e.preventDefault(); }, { passive: false });
+video.addEventListener('contextmenu', (e) => e.preventDefault());
+video.setAttribute('tabindex', '0');
+
+// ---- Keyboard ----
+video.addEventListener('keydown', (e) => { send({ type: 'key', action: 'down', code: e.code }); e.preventDefault(); });
+video.addEventListener('keyup', (e) => { send({ type: 'key', action: 'up', code: e.code }); e.preventDefault(); });
+
+// ---- Calibration ----
+document.getElementById('calibBtn').addEventListener('click', () => {
+  send({
+    type: 'calibrate',
+    dx: parseFloat(document.getElementById('dx').value) || 0,
+    dy: parseFloat(document.getElementById('dy').value) || 0,
+    scaleX: parseFloat(document.getElementById('sx').value) || 1,
+    scaleY: parseFloat(document.getElementById('sy').value) || 1
+  });
+});
+</script>
+</body>
+</html>
